@@ -171,9 +171,12 @@ public class Application {
         // 处理文件名冲突（自动添加序号）
         synchronized (usedNames.toString().intern()) {
             int counter = 1;
+            // 处理DOCX文件名冲突
             while (usedNames.contains(docxName)) {
                 docxName = baseName + "_" + (counter++) + ".docx";
             }
+            // 处理PDF文件名冲突（保持与DOCX相同的序号）
+            pdfName = baseName + (counter > 1 ? "_" + (counter-1) : "") + ".pdf";
             usedNames.add(docxName);
         }
 
