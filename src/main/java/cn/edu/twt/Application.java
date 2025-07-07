@@ -10,12 +10,15 @@ import java.io.InputStreamReader;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
-import java.util.ArrayList;
-import java.util.List;
-import java.util.Scanner;
+import java.util.*;
+import java.util.concurrent.*;
+import java.util.stream.Collectors;
 
 public class Application {
-    public static void main(String[] args) throws InterruptedException {
+    // 线程池大小，可根据CPU核心数调整
+    private static final int THREAD_POOL_SIZE = Runtime.getRuntime().availableProcessors();
+
+    public static void main(String[] args) throws InterruptedException, IOException, ExecutionException {
         // 打印欢迎信息
         printWelcomeMessage();
 
@@ -27,10 +30,10 @@ public class Application {
         if (input.equals("y1")) {
             System.out.println("开始转换...");
             convertOFDs(true);
-        }else if (input.equals("y2")) {
+        } else if (input.equals("y2")) {
             System.out.println("开始转换...");
             convertOFDs(false);
-        }else if (input.equals("n")) {
+        } else if (input.equals("n")) {
             System.out.println("程序已退出");
             System.exit(0);
         } else {
@@ -42,7 +45,7 @@ public class Application {
 
     private static void printWelcomeMessage() {
         System.out.println("====================ofd2docx====================");
-        System.out.println("请确认以下信息：");
+        System.out.println("请仔细阅读并确认以下信息：");
         System.out.println("1. 将所有要转换的ofd文件放入ofds文件夹内");
         System.out.println("2. java -jar命令执行的目录中包含ofds文件夹");
         System.out.println("3. 程序不会影响原有的ofds文件夹中的文件，输出位于out文件夹中");
@@ -51,6 +54,7 @@ public class Application {
         System.out.println("6. ofd转换为docx的转换质量可能会因文件而异");
         System.out.println("7. 【关键】输入y1使用Aspose-pdf包进行第二步转换 输入y2使用LibreOffice软件进行第二步转换");
         System.out.println("8. 【关键】y2的第二步转换依赖LibreOffice 请先提前安装");
+        System.out.println("9. 【关键】程序将使用多线程加速转换，请提前关闭无用进程以确保转换速度");
         System.out.println("====================ofd2docx====================");
         System.out.print("确认无误后输入y开始转换，输入n退出程序 (y1/y2/n)? ");
     }
@@ -58,7 +62,7 @@ public class Application {
     /**
      * 转换ofd文件为docx文件
      */
-    private static void convertOFDs(boolean y1) throws InterruptedException {
+    private static void convertOFDs(boolean y1) throws InterruptedException, IOException, ExecutionException {
         String execDir = System.getProperty("user.dir");
         File ofdDir = new File(execDir, "ofds");
         File outDir = new File(execDir, "out");
@@ -76,92 +80,139 @@ public class Application {
         }
 
         // 获取OFD文件列表
-        File[] ofdFiles = ofdDir.listFiles((dir, name) -> name.toLowerCase().endsWith(".ofd"));
+        List<Path> ofdPaths = Files.walk(ofdDir.toPath())
+                .filter(p -> p.toString().toLowerCase().endsWith(".ofd"))
+                .collect(Collectors.toList());
 
-        if (ofdFiles == null || ofdFiles.length == 0) {
-            System.out.println("警告：ofds文件夹中没有找到.ofd文件");
+        if (ofdPaths.isEmpty()) {
+            System.out.println("警告：ofds文件夹及其子目录中没有找到.ofd文件");
             return;
         }
 
-        System.out.println("找到 " + ofdFiles.length + " 个OFD文件待转换");
+        System.out.println("找到 " + ofdPaths.size() + " 个OFD文件待转换");
+        System.out.println("使用 " + THREAD_POOL_SIZE + " 个线程进行转换");
 
-        // 开始转换
-        int successCount = 0;
-        boolean alreadyConverted = false;
+        // 创建线程池
+        ExecutorService executor = Executors.newFixedThreadPool(THREAD_POOL_SIZE);
+        List<Future<ConversionResult>> futures = new ArrayList<>();
+        Set<String> usedNames = Collections.synchronizedSet(new HashSet<>());
+        List<File> needDeleteFiles = Collections.synchronizedList(new ArrayList<>());
 
-        List<File> needDeleteFiles = new ArrayList<>();
-        for (File ofdFile : ofdFiles) {
-            try {
-                String originalName = ofdFile.getName();
-                Path docxPath = Paths.get(outDir.getPath(), originalName.replace(".ofd", ".docx"));
-                Path pdfPath = Paths.get(outDir.getPath(), originalName.replace(".ofd", ".pdf"));
+        // 记录开始时间
+        long startTime = System.currentTimeMillis();
 
-                System.out.print("正在转换: " + originalName + "... ");
-                if(Files.exists(docxPath)) {
-                    successCount++;
-                    alreadyConverted = true;
-                    System.out.println("已转换过");
-                    continue;
-                }
-
-                // 转换为PDF
-                try (PDFExporterIText pdfConverter = new PDFExporterIText(ofdFile.toPath(), pdfPath)) {
-                    pdfConverter.export();
+        // 提交转换任务
+        for (Path ofdPath : ofdPaths) {
+            Future<ConversionResult> future = executor.submit(() -> {
+                try {
+                    return convertSingleFile(ofdPath, outDir, y1, usedNames, needDeleteFiles);
                 } catch (Exception e) {
-                    needDeleteFiles.add(pdfPath.toFile());
-                    throw new RuntimeException("转换为PDF时失败" + e.getMessage());
+                    return new ConversionResult(false, ofdPath.getFileName().toString(), e.getMessage());
                 }
-                // 把pdf转换为docx
-                // 两种方法
-                if (y1){
-                    try (Document pdfDocument = new Document(pdfPath.toString())) {
-                        pdfDocument.save(docxPath.toString(), SaveFormat.DocX);
-                    } catch (Exception e) {
-                        throw new RuntimeException("pdf转换为docx时失败" + e.getMessage());
-                    }
-                } else{
-                    try {
-                        // 调用 LibreOffice 命令行转换
-                        convertPdfToDocxUsingLibreOffice(pdfPath.toString(), docxPath.toString());
-                    } catch (Exception e) {
-                        needDeleteFiles.add(docxPath.toFile());
-                        throw new RuntimeException("pdf转换为docx时失败: " + e.getMessage());
-                    }
-                }
-
-                System.out.println("成功");
-                // 成功后删除pdf中间文件
-                Files.deleteIfExists(pdfPath);
-                successCount++;
-
-            } catch (Exception e) {
-                Path docxPath = Paths.get(outDir.getPath(), ofdFile.getName().replace(".ofd", ".docx"));
-                needDeleteFiles.add(docxPath.toFile());
-                System.err.println("\n转换失败: " + ofdFile.getName() + " | 原因: " + e.getMessage());
-            }
+            });
+            futures.add(future);
         }
 
+        // 等待所有任务完成
+        executor.shutdown();
+        executor.awaitTermination(Long.MAX_VALUE, TimeUnit.NANOSECONDS);
+
+        // 统计结果
+        int successCount = 0;
+        List<String> failedFiles = new ArrayList<>();
+
+        for (Future<ConversionResult> future : futures) {
+            ConversionResult result = future.get();
+            if (result.success) {
+                successCount++;
+            } else {
+                failedFiles.add(result.fileName + " - 原因: " + result.errorMessage);
+            }
+        }
 
         // 输出统计信息
         System.out.println("\n==========转换完成==========");
-        // 删除无用文件
         System.out.println("正在删除pdf中间文件与转换失败的文件...");
         System.gc();
-        Thread.sleep(1000);// 等待1s 资源回收后删除 避免被占用
+        Thread.sleep(1000); // 等待1s 资源回收后删除 避免被占用
+
         for (File file : needDeleteFiles) {
-            try{
+            try {
                 Files.delete(file.toPath());
-            }catch (Exception e){
+            } catch (Exception e) {
                 System.out.println("删除 " + file.getName() + " 失败" + " | 原因: " + e.getMessage());
             }
+        }
 
-        }
-        if (alreadyConverted) {
-            System.out.println("已转换过的文件被算在转换成功个数当中");
-        }
+        // 计算耗时
+        long endTime = System.currentTimeMillis();
+        double elapsedTime = (endTime - startTime) / 1000.0;
+
         System.out.println("成功: " + successCount + " 个");
-        System.out.println("失败: " + (ofdFiles.length - successCount) + " 个");
+        System.out.println("失败: " + failedFiles.size() + " 个");
+        if (!failedFiles.isEmpty()) {
+            System.out.println("失败文件列表:");
+            failedFiles.forEach(System.out::println);
+        }
+        System.out.println("总耗时: " + elapsedTime + " 秒");
         System.out.println("输出目录: " + outDir.getAbsolutePath());
+    }
+
+    /**
+     * 转换单个文件
+     */
+    private static ConversionResult convertSingleFile(Path ofdPath, File outDir, boolean y1,
+                                                      Set<String> usedNames, List<File> needDeleteFiles) throws Exception {
+        String originalName = ofdPath.getFileName().toString();
+        String baseName = originalName.replace(".ofd", "");
+        String docxName = baseName + ".docx";
+        String pdfName = baseName + ".pdf";
+
+        // 处理文件名冲突（自动添加序号）
+        synchronized (usedNames.toString().intern()) {
+            int counter = 1;
+            while (usedNames.contains(docxName)) {
+                docxName = baseName + "_" + (counter++) + ".docx";
+            }
+            usedNames.add(docxName);
+        }
+
+        Path docxPath = Paths.get(outDir.getPath(), docxName);
+        Path pdfPath = Paths.get(outDir.getPath(), pdfName);
+
+        System.out.println("线程 " + Thread.currentThread().getName() + " 正在转换: " + originalName);
+
+        if (Files.exists(docxPath)) {
+            System.out.println("线程 " + Thread.currentThread().getName() + " 跳过已转换文件: " + originalName);
+            return new ConversionResult(true, originalName, "已转换过");
+        }
+
+        // 转换为PDF
+        try (PDFExporterIText pdfConverter = new PDFExporterIText(ofdPath, pdfPath)) {
+            pdfConverter.export();
+        } catch (Exception e) {
+            needDeleteFiles.add(pdfPath.toFile());
+            throw new RuntimeException("转换为PDF时失败: " + e.getMessage());
+        }
+
+        // 把pdf转换为docx
+        try {
+            if (y1) {
+                try (Document pdfDocument = new Document(pdfPath.toString())) {
+                    pdfDocument.save(docxPath.toString(), SaveFormat.DocX);
+                }
+            } else {
+                convertPdfToDocxUsingLibreOffice(pdfPath.toString(), docxPath.toString());
+            }
+        } catch (Exception e) {
+            needDeleteFiles.add(docxPath.toFile());
+            throw new RuntimeException("pdf转换为docx时失败: " + e.getMessage());
+        }
+
+        // 成功后删除pdf中间文件
+        Files.deleteIfExists(pdfPath);
+        System.out.println("线程 " + Thread.currentThread().getName() + " 转换文件: " + originalName + " 成功");
+        return new ConversionResult(true, originalName, null);
     }
 
     /**
@@ -170,8 +221,7 @@ public class Application {
         * @param docxPath 输出 DOCX 文件路径
     */
     private static void convertPdfToDocxUsingLibreOffice(String pdfPath, String docxPath) throws IOException, InterruptedException {
-        // 构造 LibreOffice 命令
-        String libreOfficePath = getLibreOfficePath(); // 自动获取安装路径
+        String libreOfficePath = getLibreOfficePath();
         String command = String.format(
                 "\"%s\" --infilter=\"writer_pdf_import\" --convert-to docx \"%s\" --outdir \"%s\"",
                 libreOfficePath,
@@ -179,11 +229,9 @@ public class Application {
                 Paths.get(pdfPath).getParent().toString()
         );
 
-        // 执行命令
         Process process = Runtime.getRuntime().exec(command);
         int exitCode = process.waitFor();
 
-        // 检查是否成功
         if (exitCode != 0) {
             try (BufferedReader errorReader = new BufferedReader(
                     new InputStreamReader(process.getErrorStream()))) {
@@ -205,7 +253,6 @@ public class Application {
         String defaultPath = "soffice"; // Linux/macOS 默认在 PATH 中
 
         if (osName.contains("win")) {
-            // Windows 常见安装路径
             String[] possiblePaths = {
                     "C:\\Program Files\\LibreOffice\\program\\soffice.exe",
                     "C:\\Program Files (x86)\\LibreOffice\\program\\soffice.exe",
@@ -220,5 +267,20 @@ public class Application {
             System.exit(1);
         }
         return defaultPath;
+    }
+
+    /**
+     * 转换结果类
+     */
+    private static class ConversionResult {
+        boolean success;
+        String fileName;
+        String errorMessage;
+
+        public ConversionResult(boolean success, String fileName, String errorMessage) {
+            this.success = success;
+            this.fileName = fileName;
+            this.errorMessage = errorMessage;
+        }
     }
 }
