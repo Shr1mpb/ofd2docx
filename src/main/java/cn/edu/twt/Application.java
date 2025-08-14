@@ -142,70 +142,74 @@ public class Application {
         System.out.println("使用 " + THREAD_POOL_SIZE + " 个线程进行转换");
 
         // 创建线程池
-        ExecutorService executor = Executors.newFixedThreadPool(THREAD_POOL_SIZE);
-        List<Future<ConversionResult>> futures = new ArrayList<>();
-        Set<String> usedNames = Collections.synchronizedSet(new HashSet<>());
-        List<File> needDeleteFiles = Collections.synchronizedList(new ArrayList<>());
+        try(ExecutorService executor = Executors.newFixedThreadPool(THREAD_POOL_SIZE)) {
+            List<Future<ConversionResult>> futures = new ArrayList<>();
+            Set<String> usedNames = Collections.synchronizedSet(new HashSet<>());
+            List<File> needDeleteFiles = Collections.synchronizedList(new ArrayList<>());
 
-        // 记录开始时间
-        long startTime = System.currentTimeMillis();
+            // 记录开始时间
+            long startTime = System.currentTimeMillis();
 
-        // 提交转换任务
-        for (Path ofdPath : ofdPaths) {
-            Future<ConversionResult> future = executor.submit(() -> {
-                try {
-                    return convertSingleFile(ofdPath, outDir, y1, y1x, y1d, usedNames, needDeleteFiles);
-                } catch (Exception e) {
-                    return new ConversionResult(false, ofdPath.getFileName().toString(), e.getMessage());
+            // 提交转换任务
+            for (Path ofdPath : ofdPaths) {
+                Future<ConversionResult> future = executor.submit(() -> {
+                    try {
+                        return convertSingleFile(ofdPath, outDir, y1, y1x, y1d, usedNames, needDeleteFiles);
+                    } catch (Exception e) {
+                        return new ConversionResult(false, ofdPath.getFileName().toString(), e.getMessage());
+                    }
+                });
+                futures.add(future);
+            }
+
+            // 等待所有任务完成
+            executor.shutdown();
+            executor.awaitTermination(Long.MAX_VALUE, TimeUnit.NANOSECONDS);
+
+            // 统计结果
+            int successCount = 0;
+            List<String> failedFiles = new ArrayList<>();
+
+            for (Future<ConversionResult> future : futures) {
+                ConversionResult result = future.get();
+                if (result.success) {
+                    successCount++;
+                } else {
+                    failedFiles.add(result.fileName + " - 原因: " + result.errorMessage);
                 }
-            });
-            futures.add(future);
-        }
-
-        // 等待所有任务完成
-        executor.shutdown();
-        executor.awaitTermination(Long.MAX_VALUE, TimeUnit.NANOSECONDS);
-
-        // 统计结果
-        int successCount = 0;
-        List<String> failedFiles = new ArrayList<>();
-
-        for (Future<ConversionResult> future : futures) {
-            ConversionResult result = future.get();
-            if (result.success) {
-                successCount++;
-            } else {
-                failedFiles.add(result.fileName + " - 原因: " + result.errorMessage);
             }
-        }
 
-        // 输出统计信息
-        System.out.println("\n==========转换完成==========");
-        System.out.println("正在删除pdf中间文件与转换失败的文件...");
+            // 输出统计信息
+            System.out.println("\n==========转换完成==========");
+            System.out.println("正在删除pdf中间文件与转换失败的文件...");
 
-        System.gc();
-        Thread.sleep(1000); // 等待1s 资源回收后删除 避免文件被占用导致无法删除
+            System.gc();
+            Thread.sleep(1000); // 等待1s 资源回收后删除 避免文件被占用导致无法删除
 
-        for (File file : needDeleteFiles) {
-            try {
-                Files.delete(file.toPath());
-            } catch (Exception e) {
-                System.out.println("删除 " + file.getName() + " 失败" + " | 原因: " + e.getMessage());
+            for (File file : needDeleteFiles) {
+                try {
+                    Files.delete(file.toPath());
+                } catch (Exception e) {
+                    System.out.println("删除 " + file.getName() + " 失败" + " | 原因: " + e.getMessage());
+                }
             }
-        }
 
-        // 计算耗时
-        long endTime = System.currentTimeMillis();
-        double elapsedTime = (endTime - startTime) / 1000.0;
-        System.out.println("删除完成！");
-        System.out.println("成功: " + successCount + " 个");
-        System.out.println("失败: " + failedFiles.size() + " 个");
-        if (!failedFiles.isEmpty()) {
-            System.out.println("失败文件列表:");
-            failedFiles.forEach(System.out::println);
+            // 计算耗时
+            long endTime = System.currentTimeMillis();
+            double elapsedTime = (endTime - startTime) / 1000.0;
+            System.out.println("删除完成！");
+            System.out.println("成功: " + successCount + " 个");
+            System.out.println("失败: " + failedFiles.size() + " 个");
+            if (!failedFiles.isEmpty()) {
+                System.out.println("失败文件列表:");
+                failedFiles.forEach(System.out::println);
+            }
+            System.out.println("总耗时: " + elapsedTime + " 秒");
+            System.out.println("输出目录: " + outDir.getAbsolutePath());
+        }catch (Exception e) {
+            System.out.println("转换文件时出错： " + e.getMessage());
+            e.printStackTrace();
         }
-        System.out.println("总耗时: " + elapsedTime + " 秒");
-        System.out.println("输出目录: " + outDir.getAbsolutePath());
     }
 
     /**
@@ -266,9 +270,12 @@ public class Application {
                         TextAbsorber textAbsorber = new TextAbsorber();
                         pdfDocument.getPages().accept(textAbsorber);
                         String extractedText = textAbsorber.getText();
+                        // 去除空格
+                        String noSpaces = extractedText.replaceAll(" ", "");
                         // 创建简单的文本文件
                         try (BufferedWriter writer = Files.newBufferedWriter(docxPath)) {
-                            writer.write(extractedText);
+                            writer.write(noSpaces);
+                            writer.flush();
                         }
                     }
                 } else if (y1d) {// 转换为纯文本DOCX
@@ -277,10 +284,12 @@ public class Application {
                         TextAbsorber textAbsorber = new TextAbsorber();
                         pdfDocument.getPages().accept(textAbsorber);
                         String extractedText = textAbsorber.getText();
+                        // 去除空格
+                        String noSpaces = extractedText.replaceAll(" ", "");
 
                         try (XWPFDocument doc = new XWPFDocument()) {
                             // 按换行符分割文本
-                            String[] lines = extractedText.split("\n");
+                            String[] lines = noSpaces.split("\n");
 
                             for (String line : lines) {
                                 // 每行创建一个新段落
